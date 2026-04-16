@@ -1,0 +1,10 @@
+[{
+  "relation": ["delegate_permission/common.handle_all_urls"],
+  "target": {
+    "namespace": "android_app",
+    "package_name": "ch.rsk.marktmeile.vr",
+    "sha256_cert_fingerprints": [
+      "08:DF:B6:83:6D:2F:68:2F:52:0B:E1:0B:03:08:B2:C4:60:A7:6B:F4:EB:2E:7A:A5:92:8A:AD:70:C4:F9:AA:E6"
+    ]
+  }
+}]
