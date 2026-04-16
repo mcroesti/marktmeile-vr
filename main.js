@@ -1930,54 +1930,42 @@ function attachToHand(g, hand) {
   g.userData.grabbed = true;
   hand.userData.holding = g;
 
-  // Compute the anchor's world-space orientation axes
-  const anchorWorldQuat = new THREE.Quaternion();
-  anchor.getWorldQuaternion(anchorWorldQuat);
-
   // Remove from scene
   if (g.parent) g.parent.remove(g);
   anchor.add(g);
 
-  // In WebXR hand joints:
-  //   +Y = direction along finger (toward fingertip)
-  //   -Z = palm normal (pointing away from palm surface)
+  // Simple local-space rotations. NO world-space quaternion math.
+  // WebXR knuckle joint local axes (per spec):
+  //   -Z = toward fingertip (forward when fist points at socket)
+  //   +Y = toward back of hand (away from palm)
   //   +X = lateral
-  // When fist is closed and pointing at a socket, +Y of the knuckle joint = forward.
-  const fwd = new THREE.Vector3(0, 1, 0).applyQuaternion(anchorWorldQuat);
-  const up  = new THREE.Vector3(0, 0, -1).applyQuaternion(anchorWorldQuat);
-
-  const targetQuat = new THREE.Quaternion();
+  //
+  // So to make something point "out of the fist" = align it with -Z.
 
   if (g.userData.kind === 'wire') {
-    // Wire: built along +X, Kupferende at +X (tip x=0.102).
-    // We want +X (Kupfer) to point FORWARD (out of fist, toward socket).
-    const right = new THREE.Vector3().crossVectors(up, fwd).normalize();
-    const mat = new THREE.Matrix4().makeBasis(fwd, up, right);
-    targetQuat.setFromRotationMatrix(mat);
+    // Wire built along +X, copper tip at +X (x=0.102).
+    // Want +X → -Z (copper points forward out of fist)
+    // rotation.y = -PI/2: +X rotates to -Z ✓
+    g.quaternion.identity();
+    g.rotation.set(0, -Math.PI / 2, 0);
+    g.position.set(0, 0, -0.04);
   } else if (g.userData.kind === 'fuse') {
-    // Fuse: built along +Y. Gewindesockel at -Y (tip y=-0.01), Kappe at +Y (knurl y=0.054).
-    // We want -Y (Gewinde) to point FORWARD (into socket) = +Y points BACKWARD.
-    const negFwd = fwd.clone().negate();
-    const right = new THREE.Vector3().crossVectors(up, negFwd).normalize();
-    const mat = new THREE.Matrix4().makeBasis(right, negFwd, up);
-    targetQuat.setFromRotationMatrix(mat);
+    // Fuse built along +Y. Thread at -Y, cap at +Y.
+    // Want -Y → -Z (thread points forward into socket)
+    // rotation.x = -PI/2: +Y→+Z, -Y→-Z ✓
+    g.quaternion.identity();
+    g.rotation.set(-Math.PI / 2, 0, 0);
+    g.position.set(0, 0, -0.03);
   } else if (g.userData.kind === 'lamp') {
-    // Lamp: screw base at -Y (screw goes into ceiling socket).
-    // We want -Y (Schraubgewinde) to point FORWARD (up toward ceiling when held above head).
-    const negFwd = fwd.clone().negate();
-    const right = new THREE.Vector3().crossVectors(up, negFwd).normalize();
-    const mat = new THREE.Matrix4().makeBasis(right, negFwd, up);
-    targetQuat.setFromRotationMatrix(mat);
+    // Lamp built along +Y. Screw at -Y, bulb at +Y.
+    // Want -Y → -Z (screw points forward toward ceiling socket)
+    g.quaternion.identity();
+    g.rotation.set(-Math.PI / 2, 0, 0);
+    g.position.set(0, 0, -0.05);
   } else {
-    targetQuat.identity();
+    g.quaternion.identity();
+    g.position.set(0, 0, -0.04);
   }
-
-  // Convert world-space target rotation to anchor-local
-  const anchorWorldQuatInv = anchorWorldQuat.clone().invert();
-  g.quaternion.copy(anchorWorldQuatInv).multiply(targetQuat);
-
-  // Shift forward out of fist so object is visible (in anchor-local +Y = forward)
-  g.position.set(0, 0.04, 0);
 
   dbg(`Hand grab: ${g.userData.kind}`);
 }

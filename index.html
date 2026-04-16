@@ -40,7 +40,7 @@
 // Register Service Worker for offline PWA capability
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('./sw.js?v=8')
+    navigator.serviceWorker.register('./sw.js?v=9')
       .then((reg) => {
         console.log('[PWA] SW registered, scope:', reg.scope);
         // Force check for new SW immediately
