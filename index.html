@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#4fd1ff">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<link rel="manifest" href="./manifest.json">
+<link rel="icon" type="image/png" sizes="192x192" href="./assets/icons/icon-192.png">
+<link rel="apple-touch-icon" href="./assets/icons/icon-512.png">
+<title>Marktmeile VR - Elektro Challenge</title>
+<style>
+  body { margin: 0; overflow: hidden; font-family: sans-serif; background: #222; color: #eee; }
+  #info {
+    position: fixed; top: 10px; left: 10px; z-index: 10;
+    background: rgba(0,0,0,0.5); padding: 10px; border-radius: 6px;
+    max-width: 320px; font-size: 13px;
+  }
+  #info h1 { margin: 0 0 6px 0; font-size: 15px; }
+  #info code { background: #000; padding: 1px 4px; border-radius: 3px; }
+</style>
+</head>
+<body>
+<div id="info">
+  <h1>Elektro Challenge (WebXR)</h1>
+  Quest 3/3S: „Enter VR" drücken.<br>
+  Controller-Trigger = greifen/loslassen.<br>
+  Loslassen nahe einer passenden Klemme → rastet ein.
+</div>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module" src="./main.js"></script>
+<script>
+// Register Service Worker for offline PWA capability
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('./sw.js')
+      .then((reg) => console.log('[PWA] SW registered, scope:', reg.scope))
+      .catch((err) => console.warn('[PWA] SW registration failed:', err));
+  });
+}
+</script>
+</body>
+</html>

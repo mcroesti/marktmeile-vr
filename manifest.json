@@ -1,0 +1,25 @@
+{
+  "name": "Elektro Challenge - RSK Marktmeile 2026",
+  "short_name": "Elektro VR",
+  "description": "VR-Trainingsinstallation: Drähte, Sicherungen, Lampe, Schalter — auf Zeit!",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "orientation": "landscape",
+  "background_color": "#1a1a2e",
+  "theme_color": "#4fd1ff",
+  "categories": ["education", "games"],
+  "icons": [
+    {
+      "src": "assets/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "assets/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+# Temp scripts
+*.ps1
+!serve.ps1
+
+# Unused Sketchfab downloads
+assets/sketchfab/electric_distribution_box.glb
+assets/sketchfab/light_switch.glb
+assets/sketchfab/lowpoly_tools.glb
+assets/sketchfab/lowpoly_tools_pack.glb
+assets/sketchfab/bulb_edison_raw.glb
+
+# Dev tools
+.claude/
+blender-mcp/
+node_modules/
