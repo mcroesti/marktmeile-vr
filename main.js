@@ -1664,20 +1664,26 @@ for (let i = 0; i < 2; i++) {
   controllerGrips.push(grip);
 }
 
-// ---------- Hand Tracking (grip-to-grab) ----------
+// ---------- Hand Tracking ----------
 const hands = [];
 const handModelFactory = new XRHandModelFactory();
 
-// Grip detection: when all 4 fingertips curl close to palm → fist = gripping
-const GRIP_CURL_THRESHOLD = 0.07;  // 7cm fingertip-to-palm = closed fist
-const GRIP_OPEN_THRESHOLD = 0.10;  // 10cm = hand open (hysteresis to avoid flicker)
-const PALM_GRAB_RADIUS = 0.12;     // 12cm from palm center = grab reach
+// Tuning constants
+const HAND_TOUCH_RADIUS   = 0.10;  // 10cm — object lights up when palm is this close
+const HAND_GRAB_CURL      = 0.085; // avg fingertip-to-metacarpal < this = grip closed
+const HAND_RELEASE_CURL   = 0.11;  // > this = grip open (hysteresis)
+const HAND_BUTTON_RADIUS  = 0.08;  // palm distance to press start / switch
 
 for (let i = 0; i < 2; i++) {
   const hand = renderer.xr.getHand(i);
-  hand.userData = { holding: null, gripping: false, idx: i };
+  hand.userData = {
+    holding: null,       // currently grabbed object
+    gripping: false,     // is hand in grip pose?
+    nearObj: null,        // object currently in touch range (for highlight)
+    idx: i,
+  };
 
-  // Use three.js built-in hand mesh model (proper 3D hand)
+  // Three.js built-in mesh hand model
   const handModel = handModelFactory.createHandModel(hand, 'mesh');
   hand.add(handModel);
 
@@ -1685,137 +1691,209 @@ for (let i = 0; i < 2; i++) {
   hands.push(hand);
 }
 
-// Helper: get average curl distance (fingertips to wrist)
-function getGripCurl(hand) {
-  const wrist = hand.joints['wrist'];
-  const tips = [
-    hand.joints['index-finger-tip'],
-    hand.joints['middle-finger-tip'],
-    hand.joints['ring-finger-tip'],
-    hand.joints['pinky-finger-tip'],
+// --- Helpers ---
+
+// Grip strength: average distance from each fingertip to its own metacarpal.
+// Measures actual finger curl, not distance to wrist (which changes with wrist angle).
+function getFingerCurl(hand) {
+  const pairs = [
+    ['index-finger-tip',  'index-finger-metacarpal'],
+    ['middle-finger-tip', 'middle-finger-metacarpal'],
+    ['ring-finger-tip',   'ring-finger-metacarpal'],
+    ['pinky-finger-tip',  'pinky-finger-metacarpal'],
   ];
-  if (!wrist || tips.some(t => !t)) return Infinity;
-  let totalDist = 0;
-  for (const tip of tips) {
-    totalDist += tip.position.distanceTo(wrist.position);
+  let total = 0, count = 0;
+  for (const [tipName, metaName] of pairs) {
+    const tip  = hand.joints[tipName];
+    const meta = hand.joints[metaName];
+    if (tip && meta) {
+      total += tip.position.distanceTo(meta.position);
+      count++;
+    }
   }
-  return totalDist / tips.length;
+  return count > 0 ? total / count : Infinity;
 }
 
-// Helper: get palm center (midpoint between wrist and middle-finger-metacarpal)
-const _palmCenter = new THREE.Vector3();
+// Palm center in world space (between middle-finger-metacarpal and wrist, biased toward fingers)
+const _palmWorld = new THREE.Vector3();
+const _tmpA = new THREE.Vector3();
+const _tmpB = new THREE.Vector3();
 function getPalmWorldPos(hand) {
-  const wrist = hand.joints['wrist'];
+  const wrist   = hand.joints['wrist'];
   const midMeta = hand.joints['middle-finger-metacarpal'];
   if (!wrist || !midMeta) return null;
-  const a = new THREE.Vector3(), b = new THREE.Vector3();
-  wrist.getWorldPosition(a);
-  midMeta.getWorldPosition(b);
-  _palmCenter.addVectors(a, b).multiplyScalar(0.5);
-  return _palmCenter;
+  wrist.getWorldPosition(_tmpA);
+  midMeta.getWorldPosition(_tmpB);
+  // 60% toward fingers, 40% toward wrist — roughly where you'd grip a pen
+  _palmWorld.lerpVectors(_tmpA, _tmpB, 0.6);
+  return _palmWorld;
 }
 
+// Find the closest candidate grabbable to a world position, within maxDist
+function findNearestGrabbable(worldPos, maxDist) {
+  const candidates = grabbables.filter(g =>
+    !g.userData.snapped && g.visible && isGrabbableInCurrentState(g)
+  );
+  let closest = null, closestDist = maxDist;
+  const gp = new THREE.Vector3();
+  for (const g of candidates) {
+    g.getWorldPosition(gp);
+    const d = gp.distanceTo(worldPos);
+    if (d < closestDist) { closestDist = d; closest = g; }
+  }
+  return closest;
+}
+
+// --- Highlight: glow when hand is near a grabbable ---
+const _highlightOrigColors = new WeakMap();
+
+function setHighlight(obj, on) {
+  obj.traverse(child => {
+    if (!child.isMesh || !child.material) return;
+    if (on) {
+      if (!_highlightOrigColors.has(child)) {
+        _highlightOrigColors.set(child, child.material.emissive?.clone());
+      }
+      if (child.material.emissive) {
+        child.material.emissive.setHex(0x224400);
+        child.material.emissiveIntensity = 0.6;
+      }
+    } else {
+      const orig = _highlightOrigColors.get(child);
+      if (orig && child.material.emissive) {
+        child.material.emissive.copy(orig);
+        child.material.emissiveIntensity = 0;
+      }
+    }
+  });
+}
+
+// --- Per-frame update ---
 function updateHandTracking() {
   for (const hand of hands) {
     const wrist = hand.joints['wrist'];
     if (!wrist) continue;
 
-    const curl = getGripCurl(hand);
+    const palmPos = getPalmWorldPos(hand);
+    if (!palmPos) continue;
 
-    if (!hand.userData.gripping && curl < GRIP_CURL_THRESHOLD) {
-      // Hand closed → grab
+    const curl = getFingerCurl(hand);
+    const isGripping = curl < HAND_GRAB_CURL;
+    const wasGripping = hand.userData.gripping;
+
+    // -- Proximity highlight (only when NOT already holding something) --
+    if (!hand.userData.holding) {
+      const near = findNearestGrabbable(palmPos, HAND_TOUCH_RADIUS);
+      if (near !== hand.userData.nearObj) {
+        // Remove old highlight
+        if (hand.userData.nearObj) setHighlight(hand.userData.nearObj, false);
+        hand.userData.nearObj = near;
+        if (near) setHighlight(near, true);
+      }
+    }
+
+    // -- Grip transition: open → closed --
+    if (isGripping && !wasGripping) {
       hand.userData.gripping = true;
-      const palmPos = getPalmWorldPos(hand);
-      if (palmPos) handleHandGrab(hand, palmPos);
-    } else if (hand.userData.gripping && curl > GRIP_OPEN_THRESHOLD) {
-      // Hand opened → release
+
+      if (!hand.userData.holding) {
+        // Try grab object
+        const target = hand.userData.nearObj || findNearestGrabbable(palmPos, HAND_TOUCH_RADIUS);
+        if (target) {
+          if (hand.userData.nearObj) setHighlight(hand.userData.nearObj, false);
+          hand.userData.nearObj = null;
+          attachToHand(target, hand);
+        }
+
+        // Try press start button
+        if (!hand.userData.holding && startButton?.visible) {
+          const btnPos = new THREE.Vector3();
+          startButton.getWorldPosition(btnPos);
+          if (btnPos.distanceTo(palmPos) < HAND_BUTTON_RADIUS) onStart();
+        }
+
+        // Try toggle switch
+        if (!hand.userData.holding && currentState === STATE.SWITCH && !switchGroup.userData.activated) {
+          const swPos = new THREE.Vector3();
+          switchGroup.getWorldPosition(swPos);
+          if (swPos.distanceTo(palmPos) < HAND_BUTTON_RADIUS) onSwitchToggle();
+        }
+      }
+    }
+
+    // -- Grip transition: closed → open --
+    if (!isGripping && wasGripping && curl > HAND_RELEASE_CURL) {
       hand.userData.gripping = false;
-      handleHandRelease(hand);
+      if (hand.userData.holding) {
+        const g = hand.userData.holding;
+        detachFromHand(g, hand);
+        trySnap(g);
+      }
     }
   }
 }
 
-function handleHandGrab(hand, palmWorldPos) {
-  // Find nearest grabbable within palm reach (only current-state items)
-  const candidates = grabbables.filter(g => !g.userData.snapped && g.visible && isGrabbableInCurrentState(g));
-  let closest = null, closestDist = PALM_GRAB_RADIUS;
-  for (const g of candidates) {
-    const gPos = new THREE.Vector3();
-    g.getWorldPosition(gPos);
-    const d = gPos.distanceTo(palmWorldPos);
-    if (d < closestDist) { closestDist = d; closest = g; }
-  }
-  // Check start button (pinch still works for buttons via palm proximity)
-  if (!closest && startButton?.visible) {
-    const btnPos = new THREE.Vector3();
-    startButton.getWorldPosition(btnPos);
-    if (btnPos.distanceTo(palmWorldPos) < PALM_GRAB_RADIUS) {
-      onStart();
-      return;
-    }
-  }
-  // Check switch
-  if (!closest && currentState === STATE.SWITCH && !switchGroup.userData.activated) {
-    const swPos = new THREE.Vector3();
-    switchGroup.getWorldPosition(swPos);
-    if (swPos.distanceTo(palmWorldPos) < PALM_GRAB_RADIUS) {
-      onSwitchToggle();
-      return;
-    }
-  }
-  if (closest) {
-    attachToHand(closest, hand);
-    dbg(`Hand grab: ${closest.userData.kind}`);
-  }
-}
+// --- Attach / Detach ---
 
 function attachToHand(g, hand) {
-  // Reparent to wrist joint (has proper orientation) — same approach as controller
-  const wrist = hand.joints['wrist'];
-  if (!wrist) return;
+  // Anchor = middle-finger-phalanx-proximal (center of closed fist)
+  const anchor = hand.joints['middle-finger-phalanx-proximal'] || hand.joints['wrist'];
+  if (!anchor) return;
+
   g.userData.grabbed = true;
   hand.userData.holding = g;
+
+  // Remove from current parent
   const wp = new THREE.Vector3();
+  const wq = new THREE.Quaternion();
   g.getWorldPosition(wp);
-  scene.remove(g);
-  wrist.add(g);
-  wrist.worldToLocal(wp);
-  g.position.copy(wp);
-  // Auto-orient like controller grab
-  if (g.userData.kind === 'lamp') {
-    g.rotation.set(Math.PI, 0, 0);
-    g.position.y += 0.04;
+  g.getWorldQuaternion(wq);
+  if (g.parent) g.parent.remove(g);
+
+  // Add to anchor joint
+  anchor.add(g);
+
+  // Position: place at anchor center
+  g.position.set(0, 0, 0);
+
+  // Orientation: object sticks out from fist naturally.
+  // WebXR hand joints: -Z points from wrist toward fingertips, Y points up from palm.
+  // We want the "business end" to point away from the fist, roughly along -Z of the anchor.
+  if (g.userData.kind === 'wire') {
+    // Wire tip should point away from fist (along fingers direction = -Z of joint)
+    // Wire is built along X-axis, so rotate Y -90° to align X→-Z
+    g.rotation.set(0, Math.PI / 2, 0);
+    g.position.z = -0.04; // shift forward out of fist
   } else if (g.userData.kind === 'fuse') {
-    g.rotation.set(-Math.PI / 2, 0, 0);
-    g.position.y += 0.02;
-  } else if (g.userData.kind === 'wire') {
-    g.rotation.set(0, -Math.PI / 2, 0);
+    // Fuse screw-in end points forward out of fist
+    g.rotation.set(Math.PI / 2, 0, 0);
+    g.position.z = -0.03;
+  } else if (g.userData.kind === 'lamp') {
+    // Lamp base (screw) points up from fist for ceiling socket
+    g.rotation.set(0, 0, 0);
+    g.position.z = -0.05;
   } else {
     g.quaternion.identity();
   }
+
+  dbg(`Hand grab: ${g.userData.kind}`);
 }
 
 function detachFromHand(g, hand) {
   g.userData.grabbed = false;
   hand.userData.holding = null;
+
+  // Get world transform before removing
   const wp = new THREE.Vector3();
   const wq = new THREE.Quaternion();
   g.getWorldPosition(wp);
   g.getWorldQuaternion(wq);
-  // Remove from wrist joint, re-add to scene
+
   if (g.parent) g.parent.remove(g);
   scene.add(g);
   g.position.copy(wp);
   g.quaternion.copy(wq);
-}
 
-function handleHandRelease(hand) {
-  const g = hand.userData.holding;
-  if (!g) return;
-  detachFromHand(g, hand);
-
-  // Try snap (same logic as controller release)
-  trySnap(g);
   dbg(`Hand release: ${g.userData.kind}`);
 }
 
