@@ -169,7 +169,9 @@ renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.0;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 document.body.appendChild(renderer.domElement);
-document.body.appendChild(VRButton.createButton(renderer));
+document.body.appendChild(VRButton.createButton(renderer, {
+  optionalFeatures: ['hand-tracking']
+}));
 
 // ---------- Environment (HDRI / IBL) ----------
 // Loading the HDRI sets scene.environment — every PBR material gets realistic
@@ -1623,33 +1625,8 @@ scene.add(startButton);
   startButton.userData = { active: true, mesh: btn };
 }
 
-// ---------- Debug panel (on-screen diagnostics) ----------
-const dbgCanvas = document.createElement('canvas');
-dbgCanvas.width = 640; dbgCanvas.height = 320;
-const dbgCtx = dbgCanvas.getContext('2d');
-const dbgTex = new THREE.CanvasTexture(dbgCanvas);
-const dbgMesh = new THREE.Mesh(
-  new THREE.PlaneGeometry(0.7, 0.35),
-  new THREE.MeshBasicMaterial({ map: dbgTex, transparent: true })
-);
-dbgMesh.position.set(0.9, 1.55, -1.0);
-dbgMesh.rotation.y = -Math.PI / 6;
-scene.add(dbgMesh);
-
-const dbgLog = ['[dbg] ready'];
-function dbg(msg) {
-  dbgLog.push(msg);
-  if (dbgLog.length > 10) dbgLog.shift();
-  dbgCtx.fillStyle = 'rgba(0,0,0,0.88)';
-  dbgCtx.fillRect(0, 0, 640, 320);
-  dbgCtx.strokeStyle = '#0f0';
-  dbgCtx.strokeRect(2, 2, 636, 316);
-  dbgCtx.fillStyle = '#0f0';
-  dbgCtx.font = '18px monospace';
-  dbgLog.forEach((l, i) => dbgCtx.fillText(l.substring(0, 60), 10, 25 + i * 28));
-  dbgTex.needsUpdate = true;
-}
-dbg('ready, waiting for input');
+// ---------- Debug panel (disabled for production) ----------
+function dbg(msg) { console.log('[dbg]', msg); }
 
 // ---------- Controllers ----------
 const controllers = [];
@@ -1684,6 +1661,120 @@ for (let i = 0; i < 2; i++) {
   grip.add(controllerFactory.createControllerModel(grip));
   scene.add(grip);
   controllerGrips.push(grip);
+}
+
+// ---------- Hand Tracking (pinch-to-grab) ----------
+const hands = [];
+const PINCH_THRESHOLD = 0.025; // 2.5cm between thumb tip & index tip = pinch
+
+for (let i = 0; i < 2; i++) {
+  const hand = renderer.xr.getHand(i);
+  hand.userData = { holding: null, pinching: false, idx: i };
+
+  // Visual spheres on fingertips for feedback
+  const tipSphere = new THREE.Mesh(
+    new THREE.SphereGeometry(0.008, 8, 6),
+    new THREE.MeshBasicMaterial({ color: 0x44ff88, transparent: true, opacity: 0.7 })
+  );
+  tipSphere.name = 'handTip';
+  tipSphere.visible = false;
+  hand.add(tipSphere);
+
+  scene.add(hand);
+  hands.push(hand);
+}
+
+function updateHandTracking() {
+  for (const hand of hands) {
+    const indexTip = hand.joints['index-finger-tip'];
+    const thumbTip = hand.joints['thumb-tip'];
+    if (!indexTip || !thumbTip) continue;
+
+    // Show tip sphere at pinch midpoint
+    const tipVis = hand.getObjectByName('handTip');
+    if (tipVis) {
+      tipVis.visible = true;
+      tipVis.position.copy(indexTip.position).add(thumbTip.position).multiplyScalar(0.5);
+    }
+
+    const dist = indexTip.position.distanceTo(thumbTip.position);
+    const isPinching = dist < PINCH_THRESHOLD;
+
+    if (isPinching && !hand.userData.pinching) {
+      // Pinch started — grab nearest object
+      hand.userData.pinching = true;
+      const pinchPos = new THREE.Vector3();
+      indexTip.getWorldPosition(pinchPos);
+      handleHandGrab(hand, pinchPos);
+    } else if (!isPinching && hand.userData.pinching) {
+      // Pinch released — drop object
+      hand.userData.pinching = false;
+      handleHandRelease(hand);
+    }
+
+    // If holding, move object to pinch point
+    if (hand.userData.holding) {
+      const worldPos = new THREE.Vector3();
+      indexTip.getWorldPosition(worldPos);
+      const thumbWorld = new THREE.Vector3();
+      thumbTip.getWorldPosition(thumbWorld);
+      worldPos.add(thumbWorld).multiplyScalar(0.5);
+      hand.userData.holding.position.copy(hand.userData.holding.parent.worldToLocal(worldPos));
+    }
+  }
+}
+
+function handleHandGrab(hand, pinchWorldPos) {
+  // Find nearest grabbable within 0.15m of pinch point
+  let closest = null, closestDist = 0.15;
+  for (const g of grabbables) {
+    if (!g.visible || g.userData.snapped) continue;
+    const gPos = new THREE.Vector3();
+    g.getWorldPosition(gPos);
+    const d = gPos.distanceTo(pinchWorldPos);
+    if (d < closestDist) { closestDist = d; closest = g; }
+  }
+  // Check start button
+  if (!closest && startButton?.visible) {
+    const btnPos = new THREE.Vector3();
+    startButton.getWorldPosition(btnPos);
+    if (btnPos.distanceTo(pinchWorldPos) < 0.15) {
+      startGame();
+      return;
+    }
+  }
+  if (closest) {
+    hand.userData.holding = closest;
+    closest.userData.originalParent = closest.parent;
+    closest.userData.originalPos = closest.position.clone();
+    dbg(`Hand grab: ${closest.userData.kind}`);
+  }
+}
+
+function handleHandRelease(hand) {
+  const g = hand.userData.holding;
+  if (!g) return;
+  hand.userData.holding = null;
+
+  // Try to snap to nearest socket (same logic as controller release)
+  const gPos = new THREE.Vector3();
+  g.getWorldPosition(gPos);
+  let bestSocket = null, bestDist = 0.12;
+  const allSockets = [...wireSockets, ...fuseSockets, lampSocket];
+  for (const s of allSockets) {
+    if (s.filled) continue;
+    if (s.accepts !== g.userData.kind) continue;
+    const sPos = new THREE.Vector3();
+    s.mesh.getWorldPosition(sPos);
+    const d = sPos.distanceTo(gPos);
+    if (d < bestDist) { bestDist = d; bestSocket = s; }
+  }
+  if (bestSocket && bestSocket.accepts === g.userData.kind) {
+    // Snap!
+    snapToSocket(g, bestSocket);
+    checkStateAdvance();
+  }
+  dbg(`Hand release: ${g.userData.kind}`);
 }
 
 // Raycaster for pointer-style interaction
@@ -2095,6 +2186,7 @@ function loop(now) {
       aura.opacity = 0.0;
     }
   }
+  updateHandTracking();
   renderer.render(scene, camera);
 }
 renderer.setAnimationLoop(loop);
