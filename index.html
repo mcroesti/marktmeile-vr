@@ -40,9 +40,18 @@
 // Register Service Worker for offline PWA capability
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('./sw.js')
-      .then((reg) => console.log('[PWA] SW registered, scope:', reg.scope))
+    navigator.serviceWorker.register('./sw.js?v=3')
+      .then((reg) => {
+        console.log('[PWA] SW registered, scope:', reg.scope);
+        // Force check for new SW immediately
+        reg.update();
+      })
       .catch((err) => console.warn('[PWA] SW registration failed:', err));
+  });
+  // When new SW takes over, reload to get fresh assets
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    console.log('[PWA] New SW active — reloading for fresh code');
+    window.location.reload();
   });
 }
 </script>
