@@ -1847,7 +1847,7 @@ function updateHandTracking() {
         const g = hand.userData.holding;
         // Reset screw tracking
         hand.userData.screwAngle = 0;
-        hand.userData.lastWristAngle = null;
+        hand.userData.lastWristQuat = null;
         detachFromHand(g, hand);
         trySnap(g);
       }
@@ -1876,48 +1876,55 @@ function trackFuseScrewIn(hand) {
   }
 
   if (!nearSocket) {
-    // Not near a socket — reset tracking
     hand.userData.screwAngle = 0;
-    hand.userData.lastWristAngle = null;
+    hand.userData.lastWristQuat = null;
     return;
   }
 
-  // Measure wrist rotation around the fist's forward axis (roll)
+  // Measure wrist rotation via quaternion delta (robust regardless of arm angle)
   const wrist = hand.joints['wrist'];
   if (!wrist) return;
-  const wristQuat = new THREE.Quaternion();
-  wrist.getWorldQuaternion(wristQuat);
-  // Extract roll: project wrist Z-axis onto a plane, measure angle
-  const wristRight = new THREE.Vector3(1, 0, 0).applyQuaternion(wristQuat);
-  const currentAngle = Math.atan2(wristRight.y, wristRight.x);
+  const currentQuat = new THREE.Quaternion();
+  wrist.getWorldQuaternion(currentQuat);
 
-  if (hand.userData.lastWristAngle !== null && hand.userData.lastWristAngle !== undefined) {
-    let delta = currentAngle - hand.userData.lastWristAngle;
-    // Normalize to [-PI, PI]
-    while (delta > Math.PI) delta -= Math.PI * 2;
-    while (delta < -Math.PI) delta += Math.PI * 2;
-    // Only count clockwise rotation (positive delta = screwing in)
-    // Accept both directions since handedness varies
-    hand.userData.screwAngle = (hand.userData.screwAngle || 0) + Math.abs(delta);
+  if (hand.userData.lastWristQuat) {
+    // Compute rotation delta between frames
+    const invPrev = hand.userData.lastWristQuat.clone().invert();
+    const deltaQuat = new THREE.Quaternion().multiplyQuaternions(currentQuat, invPrev);
 
-    // Visual feedback: rotate the fuse model as user twists
-    g.rotateY(delta * 0.5);
+    // Extract angle from quaternion delta (always positive)
+    const halfAngle = Math.acos(Math.min(1, Math.abs(deltaQuat.w)));
+    const angle = halfAngle * 2;
 
-    // Check if enough rotation accumulated
+    // Only accumulate meaningful rotation (filter micro-jitter)
+    if (angle > 0.02) {
+      hand.userData.screwAngle = (hand.userData.screwAngle || 0) + angle;
+    }
+
+    // Check if enough total rotation accumulated
     if (hand.userData.screwAngle >= FUSE_SCREW_NEEDED) {
-      // Screw-in complete! Snap the fuse
+      // Screw-in complete! Detach properly then snap
       hand.userData.screwAngle = 0;
-      hand.userData.lastWristAngle = null;
+      hand.userData.lastWristQuat = null;
+
+      // Proper reparenting (preserve world transform)
+      const wp = new THREE.Vector3();
+      const wq = new THREE.Quaternion();
+      g.getWorldPosition(wp);
+      g.getWorldQuaternion(wq);
       hand.userData.holding = null;
       g.userData.grabbed = false;
       if (g.parent) g.parent.remove(g);
       scene.add(g);
+      g.position.copy(wp);
+      g.quaternion.copy(wq);
+
       snapIntoSocket(g, nearSocket);
       dbg('Fuse screwed in!');
       return;
     }
   }
-  hand.userData.lastWristAngle = currentAngle;
+  hand.userData.lastWristQuat = currentQuat.clone();
 }
 
 // --- Attach / Detach ---
@@ -1942,27 +1949,33 @@ function attachToHand(g, hand) {
   //
   // So to make something point "out of the fist" = align it with -Z.
 
+  // Joint local axes on Quest 3S (middle-finger-phalanx-proximal):
+  //   rotation.y = PI/2 maps +X → -Z (verified: wire copper points forward)
+  //   rotation.x = PI/2 maps +Y → +Z, -Y → -Z
+  // -Z = forward out of fist. Position -Z = shift forward.
+
   if (g.userData.kind === 'wire') {
-    // Wire built along +X, copper tip at +X.
-    // +Z = forward out of fist on Quest
+    // Wire: copper tip at +X → maps to -Z (forward). Confirmed correct.
+    // Position +Z shifts grip point backward so copper sticks out.
     g.quaternion.identity();
     g.rotation.set(0, Math.PI / 2, 0);
     g.position.set(0, 0, 0.04);
   } else if (g.userData.kind === 'fuse') {
-    // Fuse built along +Y. Thread at -Y, cap at +Y.
-    // Want thread (-Y) forward (+Z)
+    // Fuse: cap at +Y → +Z (in hand), thread at -Y → -Z (forward).
+    // Fuse body is mostly at +Y (0 to 0.06), maps to +Z after rotation.
+    // Need negative Z offset to pull body into fist, thread out front.
     g.quaternion.identity();
     g.rotation.set(Math.PI / 2, 0, 0);
-    g.position.set(0, 0, 0.03);
+    g.position.set(0, 0, -0.04);
   } else if (g.userData.kind === 'lamp') {
-    // Lamp built along +Y. Screw at -Y, bulb at +Y.
-    // Want screw (-Y) forward (+Z)
+    // Lamp: bulb at +Y → +Z (in hand), screw at -Y → -Z (forward).
+    // Need negative Z offset so screw sticks out, bulb stays in fist.
     g.quaternion.identity();
     g.rotation.set(Math.PI / 2, 0, 0);
-    g.position.set(0, 0, 0.05);
+    g.position.set(0, 0, -0.02);
   } else {
     g.quaternion.identity();
-    g.position.set(0, 0, 0.04);
+    g.position.set(0, 0, 0);
   }
 
   dbg(`Hand grab: ${g.userData.kind}`);
