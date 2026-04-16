@@ -1943,28 +1943,26 @@ function attachToHand(g, hand) {
   // So to make something point "out of the fist" = align it with -Z.
 
   if (g.userData.kind === 'wire') {
-    // Wire built along +X, copper tip at +X (x=0.102).
-    // Want +X → -Z (copper points forward out of fist)
-    // rotation.y = -PI/2: +X rotates to -Z ✓
+    // Wire built along +X, copper tip at +X.
+    // +Z = forward out of fist on Quest
     g.quaternion.identity();
-    g.rotation.set(0, -Math.PI / 2, 0);
-    g.position.set(0, 0, -0.04);
+    g.rotation.set(0, Math.PI / 2, 0);
+    g.position.set(0, 0, 0.04);
   } else if (g.userData.kind === 'fuse') {
     // Fuse built along +Y. Thread at -Y, cap at +Y.
-    // Want -Y → -Z (thread points forward into socket)
-    // rotation.x = -PI/2: +Y→+Z, -Y→-Z ✓
+    // Want thread (-Y) forward (+Z)
     g.quaternion.identity();
-    g.rotation.set(-Math.PI / 2, 0, 0);
-    g.position.set(0, 0, -0.03);
+    g.rotation.set(Math.PI / 2, 0, 0);
+    g.position.set(0, 0, 0.03);
   } else if (g.userData.kind === 'lamp') {
     // Lamp built along +Y. Screw at -Y, bulb at +Y.
-    // Want -Y → -Z (screw points forward toward ceiling socket)
+    // Want screw (-Y) forward (+Z)
     g.quaternion.identity();
-    g.rotation.set(-Math.PI / 2, 0, 0);
-    g.position.set(0, 0, -0.05);
+    g.rotation.set(Math.PI / 2, 0, 0);
+    g.position.set(0, 0, 0.05);
   } else {
     g.quaternion.identity();
-    g.position.set(0, 0, -0.04);
+    g.position.set(0, 0, 0.04);
   }
 
   dbg(`Hand grab: ${g.userData.kind}`);

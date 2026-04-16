@@ -1,7 +1,7 @@
 // Service Worker — Elektro Challenge PWA
 // Caches all assets for fully offline operation on Quest
 
-const CACHE_NAME = 'elektro-vr-v9';
+const CACHE_NAME = 'elektro-vr-v10';
 const ASSETS_TO_CACHE = [
   './',
   './index.html',
