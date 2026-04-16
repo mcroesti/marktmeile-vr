@@ -1664,14 +1664,18 @@ for (let i = 0; i < 2; i++) {
   controllerGrips.push(grip);
 }
 
-// ---------- Hand Tracking (pinch-to-grab) ----------
+// ---------- Hand Tracking (grip-to-grab) ----------
 const hands = [];
-const PINCH_THRESHOLD = 0.025; // 2.5cm between thumb tip & index tip = pinch
 const handModelFactory = new XRHandModelFactory();
+
+// Grip detection: when all 4 fingertips curl close to palm → fist = gripping
+const GRIP_CURL_THRESHOLD = 0.07;  // 7cm fingertip-to-palm = closed fist
+const GRIP_OPEN_THRESHOLD = 0.10;  // 10cm = hand open (hysteresis to avoid flicker)
+const PALM_GRAB_RADIUS = 0.12;     // 12cm from palm center = grab reach
 
 for (let i = 0; i < 2; i++) {
   const hand = renderer.xr.getHand(i);
-  hand.userData = { holding: null, pinching: false, idx: i };
+  hand.userData = { holding: null, gripping: false, idx: i };
 
   // Use three.js built-in hand mesh model (proper 3D hand)
   const handModel = handModelFactory.createHandModel(hand, 'mesh');
@@ -1681,43 +1685,71 @@ for (let i = 0; i < 2; i++) {
   hands.push(hand);
 }
 
+// Helper: get average curl distance (fingertips to wrist)
+function getGripCurl(hand) {
+  const wrist = hand.joints['wrist'];
+  const tips = [
+    hand.joints['index-finger-tip'],
+    hand.joints['middle-finger-tip'],
+    hand.joints['ring-finger-tip'],
+    hand.joints['pinky-finger-tip'],
+  ];
+  if (!wrist || tips.some(t => !t)) return Infinity;
+  let totalDist = 0;
+  for (const tip of tips) {
+    totalDist += tip.position.distanceTo(wrist.position);
+  }
+  return totalDist / tips.length;
+}
+
+// Helper: get palm center (midpoint between wrist and middle-finger-metacarpal)
+const _palmCenter = new THREE.Vector3();
+function getPalmWorldPos(hand) {
+  const wrist = hand.joints['wrist'];
+  const midMeta = hand.joints['middle-finger-metacarpal'];
+  if (!wrist || !midMeta) return null;
+  const a = new THREE.Vector3(), b = new THREE.Vector3();
+  wrist.getWorldPosition(a);
+  midMeta.getWorldPosition(b);
+  _palmCenter.addVectors(a, b).multiplyScalar(0.5);
+  return _palmCenter;
+}
+
 function updateHandTracking() {
   for (const hand of hands) {
-    const indexTip = hand.joints['index-finger-tip'];
-    const thumbTip = hand.joints['thumb-tip'];
-    if (!indexTip || !thumbTip) continue;
+    const wrist = hand.joints['wrist'];
+    if (!wrist) continue;
 
-    // Pinch detection
-    const dist = indexTip.position.distanceTo(thumbTip.position);
-    const isPinching = dist < PINCH_THRESHOLD;
+    const curl = getGripCurl(hand);
 
-    if (isPinching && !hand.userData.pinching) {
-      hand.userData.pinching = true;
-      const pinchPos = new THREE.Vector3();
-      indexTip.getWorldPosition(pinchPos);
-      handleHandGrab(hand, pinchPos);
-    } else if (!isPinching && hand.userData.pinching) {
-      hand.userData.pinching = false;
+    if (!hand.userData.gripping && curl < GRIP_CURL_THRESHOLD) {
+      // Hand closed → grab
+      hand.userData.gripping = true;
+      const palmPos = getPalmWorldPos(hand);
+      if (palmPos) handleHandGrab(hand, palmPos);
+    } else if (hand.userData.gripping && curl > GRIP_OPEN_THRESHOLD) {
+      // Hand opened → release
+      hand.userData.gripping = false;
       handleHandRelease(hand);
     }
   }
 }
 
-function handleHandGrab(hand, pinchWorldPos) {
-  // Find nearest grabbable within 0.15m of pinch point (only current-state items)
+function handleHandGrab(hand, palmWorldPos) {
+  // Find nearest grabbable within palm reach (only current-state items)
   const candidates = grabbables.filter(g => !g.userData.snapped && g.visible && isGrabbableInCurrentState(g));
-  let closest = null, closestDist = 0.15;
+  let closest = null, closestDist = PALM_GRAB_RADIUS;
   for (const g of candidates) {
     const gPos = new THREE.Vector3();
     g.getWorldPosition(gPos);
-    const d = gPos.distanceTo(pinchWorldPos);
+    const d = gPos.distanceTo(palmWorldPos);
     if (d < closestDist) { closestDist = d; closest = g; }
   }
-  // Check start button
+  // Check start button (pinch still works for buttons via palm proximity)
   if (!closest && startButton?.visible) {
     const btnPos = new THREE.Vector3();
     startButton.getWorldPosition(btnPos);
-    if (btnPos.distanceTo(pinchWorldPos) < 0.15) {
+    if (btnPos.distanceTo(palmWorldPos) < PALM_GRAB_RADIUS) {
       onStart();
       return;
     }
@@ -1726,7 +1758,7 @@ function handleHandGrab(hand, pinchWorldPos) {
   if (!closest && currentState === STATE.SWITCH && !switchGroup.userData.activated) {
     const swPos = new THREE.Vector3();
     switchGroup.getWorldPosition(swPos);
-    if (swPos.distanceTo(pinchWorldPos) < 0.15) {
+    if (swPos.distanceTo(palmWorldPos) < PALM_GRAB_RADIUS) {
       onSwitchToggle();
       return;
     }
