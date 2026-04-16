@@ -1835,16 +1835,89 @@ function updateHandTracking() {
       }
     }
 
+    // -- Fuse screw-in: track wrist rotation while holding fuse near socket --
+    if (hand.userData.holding && hand.userData.holding.userData.kind === 'fuse' && isGripping) {
+      trackFuseScrewIn(hand);
+    }
+
     // -- Grip transition: closed → open --
     if (!isGripping && wasGripping && curl > HAND_RELEASE_CURL) {
       hand.userData.gripping = false;
       if (hand.userData.holding) {
         const g = hand.userData.holding;
+        // Reset screw tracking
+        hand.userData.screwAngle = 0;
+        hand.userData.lastWristAngle = null;
         detachFromHand(g, hand);
         trySnap(g);
       }
     }
   }
+}
+
+// --- Fuse screw-in mechanic ---
+// When holding a fuse near a fuse socket, track cumulative wrist rotation.
+// After enough rotation (~720° = 2 full turns), auto-snap the fuse.
+const FUSE_SCREW_DIST = 0.15;      // max distance to socket for screw-in
+const FUSE_SCREW_NEEDED = Math.PI * 3; // ~1.5 full turns needed (540°)
+
+function trackFuseScrewIn(hand) {
+  const g = hand.userData.holding;
+  const gp = new THREE.Vector3();
+  g.getWorldPosition(gp);
+
+  // Find nearest unfilled fuse socket in range
+  let nearSocket = null, nearDist = FUSE_SCREW_DIST;
+  for (const s of fuseSockets) {
+    if (s.filled) continue;
+    s.group.getWorldPosition(s.worldPos);
+    const d = gp.distanceTo(s.worldPos);
+    if (d < nearDist) { nearDist = d; nearSocket = s; }
+  }
+
+  if (!nearSocket) {
+    // Not near a socket — reset tracking
+    hand.userData.screwAngle = 0;
+    hand.userData.lastWristAngle = null;
+    return;
+  }
+
+  // Measure wrist rotation around the fist's forward axis (roll)
+  const wrist = hand.joints['wrist'];
+  if (!wrist) return;
+  const wristQuat = new THREE.Quaternion();
+  wrist.getWorldQuaternion(wristQuat);
+  // Extract roll: project wrist Z-axis onto a plane, measure angle
+  const wristRight = new THREE.Vector3(1, 0, 0).applyQuaternion(wristQuat);
+  const currentAngle = Math.atan2(wristRight.y, wristRight.x);
+
+  if (hand.userData.lastWristAngle !== null && hand.userData.lastWristAngle !== undefined) {
+    let delta = currentAngle - hand.userData.lastWristAngle;
+    // Normalize to [-PI, PI]
+    while (delta > Math.PI) delta -= Math.PI * 2;
+    while (delta < -Math.PI) delta += Math.PI * 2;
+    // Only count clockwise rotation (positive delta = screwing in)
+    // Accept both directions since handedness varies
+    hand.userData.screwAngle = (hand.userData.screwAngle || 0) + Math.abs(delta);
+
+    // Visual feedback: rotate the fuse model as user twists
+    g.rotateY(delta * 0.5);
+
+    // Check if enough rotation accumulated
+    if (hand.userData.screwAngle >= FUSE_SCREW_NEEDED) {
+      // Screw-in complete! Snap the fuse
+      hand.userData.screwAngle = 0;
+      hand.userData.lastWristAngle = null;
+      hand.userData.holding = null;
+      g.userData.grabbed = false;
+      if (g.parent) g.parent.remove(g);
+      scene.add(g);
+      snapIntoSocket(g, nearSocket);
+      dbg('Fuse screwed in!');
+      return;
+    }
+  }
+  hand.userData.lastWristAngle = currentAngle;
 }
 
 // --- Attach / Detach ---
@@ -1858,44 +1931,41 @@ function attachToHand(g, hand) {
   hand.userData.holding = g;
 
   // Compute the anchor's world-space orientation axes
-  // We'll place the object relative to where the knuckle is and how it's oriented.
-  const anchorWorldPos = new THREE.Vector3();
   const anchorWorldQuat = new THREE.Quaternion();
-  anchor.getWorldPosition(anchorWorldPos);
   anchor.getWorldQuaternion(anchorWorldQuat);
 
   // Remove from scene
   if (g.parent) g.parent.remove(g);
   anchor.add(g);
 
-  // Place at center of fist (local origin of anchor)
-  g.position.set(0, 0, 0);
+  // In WebXR hand joints:
+  //   +Y = direction along finger (toward fingertip)
+  //   -Z = palm normal (pointing away from palm surface)
+  //   +X = lateral
+  // When fist is closed and pointing at a socket, +Y of the knuckle joint = forward.
+  const fwd = new THREE.Vector3(0, 1, 0).applyQuaternion(anchorWorldQuat);
+  const up  = new THREE.Vector3(0, 0, -1).applyQuaternion(anchorWorldQuat);
 
-  // Compute "forward" direction of the hand in world space (finger direction)
-  // In the joint's local space, fingers extend along -Z
-  const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(anchorWorldQuat);
-  // "up" from palm = +Y of anchor
-  const up  = new THREE.Vector3(0, 1, 0).applyQuaternion(anchorWorldQuat);
-
-  // Build a rotation that aligns the object's business-end with the fist direction.
-  // We do this in world space, then convert to anchor-local.
   const targetQuat = new THREE.Quaternion();
 
   if (g.userData.kind === 'wire') {
-    // Wire is built along +X. We want +X to point in the fist's forward direction.
-    // Create rotation: +X → fwd, +Y → up
-    const mat = new THREE.Matrix4().makeBasis(fwd, up, new THREE.Vector3().crossVectors(fwd, up).normalize());
+    // Wire: built along +X, Kupferende at +X (tip x=0.102).
+    // We want +X (Kupfer) to point FORWARD (out of fist, toward socket).
+    const right = new THREE.Vector3().crossVectors(up, fwd).normalize();
+    const mat = new THREE.Matrix4().makeBasis(fwd, up, right);
     targetQuat.setFromRotationMatrix(mat);
   } else if (g.userData.kind === 'fuse') {
-    // Fuse is built vertically (+Y). We want +Y to point in the fist's forward direction.
-    const right = new THREE.Vector3().crossVectors(fwd, up).normalize();
-    const mat = new THREE.Matrix4().makeBasis(right, fwd, up);
+    // Fuse: built along +Y. Gewindesockel at -Y (tip y=-0.01), Kappe at +Y (knurl y=0.054).
+    // We want -Y (Gewinde) to point FORWARD (into socket) = +Y points BACKWARD.
+    const negFwd = fwd.clone().negate();
+    const right = new THREE.Vector3().crossVectors(up, negFwd).normalize();
+    const mat = new THREE.Matrix4().makeBasis(right, negFwd, up);
     targetQuat.setFromRotationMatrix(mat);
   } else if (g.userData.kind === 'lamp') {
-    // Lamp screw base at bottom (-Y). We want -Y to point in the fist's forward.
-    // So +Y points backward: flip fwd
+    // Lamp: screw base at -Y (screw goes into ceiling socket).
+    // We want -Y (Schraubgewinde) to point FORWARD (up toward ceiling when held above head).
     const negFwd = fwd.clone().negate();
-    const right = new THREE.Vector3().crossVectors(negFwd, up).normalize();
+    const right = new THREE.Vector3().crossVectors(up, negFwd).normalize();
     const mat = new THREE.Matrix4().makeBasis(right, negFwd, up);
     targetQuat.setFromRotationMatrix(mat);
   } else {
@@ -1906,8 +1976,8 @@ function attachToHand(g, hand) {
   const anchorWorldQuatInv = anchorWorldQuat.clone().invert();
   g.quaternion.copy(anchorWorldQuatInv).multiply(targetQuat);
 
-  // Shift slightly forward out of the fist so it's visible
-  g.position.set(0, 0, -0.04);
+  // Shift forward out of fist so object is visible (in anchor-local +Y = forward)
+  g.position.set(0, 0.04, 0);
 
   dbg(`Hand grab: ${g.userData.kind}`);
 }
