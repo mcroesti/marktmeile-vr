@@ -1,7 +1,7 @@
 // Service Worker — Elektro Challenge PWA
 // Caches all assets for fully offline operation on Quest
 
-const CACHE_NAME = 'elektro-vr-v3';
+const CACHE_NAME = 'elektro-vr-v4';
 const ASSETS_TO_CACHE = [
   './',
   './index.html',
@@ -31,6 +31,7 @@ const CDN_ASSETS = [
   'https://unpkg.com/three@0.160.0/build/three.module.js',
   'https://unpkg.com/three@0.160.0/examples/jsm/webxr/VRButton.js',
   'https://unpkg.com/three@0.160.0/examples/jsm/webxr/XRControllerModelFactory.js',
+  'https://unpkg.com/three@0.160.0/examples/jsm/webxr/XRHandModelFactory.js',
   'https://unpkg.com/three@0.160.0/examples/jsm/loaders/GLTFLoader.js',
   'https://unpkg.com/three@0.160.0/examples/jsm/loaders/RGBELoader.js',
 ];

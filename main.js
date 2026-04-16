@@ -5,6 +5,7 @@
 import * as THREE from 'three';
 import { VRButton } from 'three/addons/webxr/VRButton.js';
 import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
+import { XRHandModelFactory } from 'three/addons/webxr/XRHandModelFactory.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
 
@@ -1666,176 +1667,25 @@ for (let i = 0; i < 2; i++) {
 // ---------- Hand Tracking (pinch-to-grab) ----------
 const hands = [];
 const PINCH_THRESHOLD = 0.025; // 2.5cm between thumb tip & index tip = pinch
-
-// Finger segment definitions: [startJoint, endJoint, radius]
-// Each segment is a capsule (rounded cylinder) between two joints
-const GLOVE_SEGMENTS = [
-  // Thumb (thicker)
-  ['thumb-metacarpal', 'thumb-phalanx-proximal', 0.012],
-  ['thumb-phalanx-proximal', 'thumb-phalanx-distal', 0.011],
-  ['thumb-phalanx-distal', 'thumb-tip', 0.010],
-  // Index
-  ['index-finger-phalanx-proximal', 'index-finger-phalanx-intermediate', 0.010],
-  ['index-finger-phalanx-intermediate', 'index-finger-phalanx-distal', 0.009],
-  ['index-finger-phalanx-distal', 'index-finger-tip', 0.008],
-  // Middle
-  ['middle-finger-phalanx-proximal', 'middle-finger-phalanx-intermediate', 0.010],
-  ['middle-finger-phalanx-intermediate', 'middle-finger-phalanx-distal', 0.009],
-  ['middle-finger-phalanx-distal', 'middle-finger-tip', 0.008],
-  // Ring
-  ['ring-finger-phalanx-proximal', 'ring-finger-phalanx-intermediate', 0.009],
-  ['ring-finger-phalanx-intermediate', 'ring-finger-phalanx-distal', 0.008],
-  ['ring-finger-phalanx-distal', 'ring-finger-tip', 0.007],
-  // Pinky
-  ['pinky-finger-phalanx-proximal', 'pinky-finger-phalanx-intermediate', 0.008],
-  ['pinky-finger-phalanx-intermediate', 'pinky-finger-phalanx-distal', 0.007],
-  ['pinky-finger-phalanx-distal', 'pinky-finger-tip', 0.006],
-];
-
-// Palm connections (flat triangles between knuckles and wrist)
-const PALM_TRIS = [
-  ['wrist', 'index-finger-metacarpal', 'middle-finger-metacarpal'],
-  ['wrist', 'middle-finger-metacarpal', 'ring-finger-metacarpal'],
-  ['wrist', 'ring-finger-metacarpal', 'pinky-finger-metacarpal'],
-  ['index-finger-metacarpal', 'index-finger-phalanx-proximal', 'middle-finger-phalanx-proximal'],
-  ['index-finger-metacarpal', 'middle-finger-metacarpal', 'middle-finger-phalanx-proximal'],
-  ['middle-finger-metacarpal', 'middle-finger-phalanx-proximal', 'ring-finger-phalanx-proximal'],
-  ['middle-finger-metacarpal', 'ring-finger-metacarpal', 'ring-finger-phalanx-proximal'],
-  ['ring-finger-metacarpal', 'ring-finger-phalanx-proximal', 'pinky-finger-phalanx-proximal'],
-  ['ring-finger-metacarpal', 'pinky-finger-metacarpal', 'pinky-finger-phalanx-proximal'],
-  ['wrist', 'thumb-metacarpal', 'index-finger-metacarpal'],
-];
-
-// Glove material — orange work gloves with slight roughness
-const gloveMat = new THREE.MeshStandardMaterial({
-  color: 0xE8820C,
-  roughness: 0.85,
-  metalness: 0.0,
-});
-const gloveTipMat = new THREE.MeshStandardMaterial({
-  color: 0x555555, // dark grey rubber fingertips
-  roughness: 0.6,
-  metalness: 0.0,
-});
-const palmMat = new THREE.MeshStandardMaterial({
-  color: 0xD07008,
-  roughness: 0.9,
-  metalness: 0.0,
-  side: THREE.DoubleSide,
-});
-// Wrist cuff — darker band
-const cuffMat = new THREE.MeshStandardMaterial({
-  color: 0x333333,
-  roughness: 0.7,
-  metalness: 0.1,
-});
+const handModelFactory = new XRHandModelFactory();
 
 for (let i = 0; i < 2; i++) {
   const hand = renderer.xr.getHand(i);
   hand.userData = { holding: null, pinching: false, idx: i };
 
-  // Create finger segment cylinders (capsule-like)
-  const segMeshes = [];
-  for (let s = 0; s < GLOVE_SEGMENTS.length; s++) {
-    const [, , radius] = GLOVE_SEGMENTS[s];
-    // Use tip material for last segment of each finger (tip segments: indices 2,5,8,11,14)
-    const isTip = (s === 2 || s === 5 || s === 8 || s === 11 || s === 14);
-    const geo = new THREE.CapsuleGeometry(radius, 0.01, 4, 8); // length will be scaled
-    const mesh = new THREE.Mesh(geo, isTip ? gloveTipMat : gloveMat);
-    mesh.visible = false;
-    hand.add(mesh);
-    segMeshes.push(mesh);
-  }
-
-  // Create palm surface (triangulated mesh updated each frame)
-  const palmGeo = new THREE.BufferGeometry();
-  const palmVerts = new Float32Array(PALM_TRIS.length * 9); // 3 verts × 3 components
-  palmGeo.setAttribute('position', new THREE.BufferAttribute(palmVerts, 3));
-  palmGeo.computeVertexNormals();
-  const palmMesh = new THREE.Mesh(palmGeo, palmMat);
-  palmMesh.visible = false;
-  hand.add(palmMesh);
-
-  // Wrist cuff (torus around wrist)
-  const cuffGeo = new THREE.TorusGeometry(0.035, 0.008, 8, 16);
-  const cuffMesh = new THREE.Mesh(cuffGeo, cuffMat);
-  cuffMesh.visible = false;
-  hand.add(cuffMesh);
-
-  hand.userData.segMeshes = segMeshes;
-  hand.userData.palmMesh = palmMesh;
-  hand.userData.palmGeo = palmGeo;
-  hand.userData.cuffMesh = cuffMesh;
+  // Use three.js built-in hand mesh model (proper 3D hand)
+  const handModel = handModelFactory.createHandModel(hand, 'mesh');
+  hand.add(handModel);
 
   scene.add(hand);
   hands.push(hand);
 }
-
-// Reusable vectors
-const _segA = new THREE.Vector3();
-const _segB = new THREE.Vector3();
-const _segMid = new THREE.Vector3();
-const _segDir = new THREE.Vector3();
-const _segUp = new THREE.Vector3(0, 1, 0);
-const _segQuat = new THREE.Quaternion();
-const _triV = new THREE.Vector3();
 
 function updateHandTracking() {
   for (const hand of hands) {
     const indexTip = hand.joints['index-finger-tip'];
     const thumbTip = hand.joints['thumb-tip'];
     if (!indexTip || !thumbTip) continue;
-
-    // Update finger segment capsules
-    const sm = hand.userData.segMeshes;
-    for (let s = 0; s < GLOVE_SEGMENTS.length; s++) {
-      const [jNameA, jNameB, radius] = GLOVE_SEGMENTS[s];
-      const ja = hand.joints[jNameA];
-      const jb = hand.joints[jNameB];
-      if (!ja || !jb) continue;
-      sm[s].visible = true;
-      _segA.copy(ja.position);
-      _segB.copy(jb.position);
-      const len = _segA.distanceTo(_segB);
-      _segMid.addVectors(_segA, _segB).multiplyScalar(0.5);
-      sm[s].position.copy(_segMid);
-      // CapsuleGeometry: height is the cylinder part; total = height + 2*radius
-      // Scale Y to match bone length minus the two caps
-      const cylLen = Math.max(0.001, len - radius * 2);
-      sm[s].scale.set(1, cylLen / 0.01, 1); // 0.01 = original geo height
-      _segDir.subVectors(_segB, _segA).normalize();
-      _segQuat.setFromUnitVectors(_segUp, _segDir);
-      sm[s].quaternion.copy(_segQuat);
-    }
-
-    // Update palm triangles
-    const pm = hand.userData.palmMesh;
-    const pg = hand.userData.palmGeo;
-    const posArr = pg.attributes.position.array;
-    let allPalmOk = true;
-    for (let t = 0; t < PALM_TRIS.length; t++) {
-      const [n0, n1, n2] = PALM_TRIS[t];
-      const j0 = hand.joints[n0], j1 = hand.joints[n1], j2 = hand.joints[n2];
-      if (!j0 || !j1 || !j2) { allPalmOk = false; break; }
-      const base = t * 9;
-      posArr[base]   = j0.position.x; posArr[base+1] = j0.position.y; posArr[base+2] = j0.position.z;
-      posArr[base+3] = j1.position.x; posArr[base+4] = j1.position.y; posArr[base+5] = j1.position.z;
-      posArr[base+6] = j2.position.x; posArr[base+7] = j2.position.y; posArr[base+8] = j2.position.z;
-    }
-    if (allPalmOk) {
-      pm.visible = true;
-      pg.attributes.position.needsUpdate = true;
-      pg.computeVertexNormals();
-    }
-
-    // Update wrist cuff
-    const cuff = hand.userData.cuffMesh;
-    const wrist = hand.joints['wrist'];
-    if (wrist) {
-      cuff.visible = true;
-      cuff.position.copy(wrist.position);
-      cuff.quaternion.copy(wrist.quaternion);
-    }
 
     // Pinch detection
     const dist = indexTip.position.distanceTo(thumbTip.position);
@@ -1850,24 +1700,14 @@ function updateHandTracking() {
       hand.userData.pinching = false;
       handleHandRelease(hand);
     }
-
-    // If holding, move object to pinch point
-    if (hand.userData.holding) {
-      const worldPos = new THREE.Vector3();
-      indexTip.getWorldPosition(worldPos);
-      const thumbWorld = new THREE.Vector3();
-      thumbTip.getWorldPosition(thumbWorld);
-      worldPos.add(thumbWorld).multiplyScalar(0.5);
-      hand.userData.holding.position.copy(hand.userData.holding.parent.worldToLocal(worldPos));
-    }
   }
 }
 
 function handleHandGrab(hand, pinchWorldPos) {
-  // Find nearest grabbable within 0.15m of pinch point
+  // Find nearest grabbable within 0.15m of pinch point (only current-state items)
+  const candidates = grabbables.filter(g => !g.userData.snapped && g.visible && isGrabbableInCurrentState(g));
   let closest = null, closestDist = 0.15;
-  for (const g of grabbables) {
-    if (!g.visible || g.userData.snapped) continue;
+  for (const g of candidates) {
     const gPos = new THREE.Vector3();
     g.getWorldPosition(gPos);
     const d = gPos.distanceTo(pinchWorldPos);
@@ -1878,41 +1718,72 @@ function handleHandGrab(hand, pinchWorldPos) {
     const btnPos = new THREE.Vector3();
     startButton.getWorldPosition(btnPos);
     if (btnPos.distanceTo(pinchWorldPos) < 0.15) {
-      startGame();
+      onStart();
+      return;
+    }
+  }
+  // Check switch
+  if (!closest && currentState === STATE.SWITCH && !switchGroup.userData.activated) {
+    const swPos = new THREE.Vector3();
+    switchGroup.getWorldPosition(swPos);
+    if (swPos.distanceTo(pinchWorldPos) < 0.15) {
+      onSwitchToggle();
       return;
     }
   }
   if (closest) {
-    hand.userData.holding = closest;
-    closest.userData.originalParent = closest.parent;
-    closest.userData.originalPos = closest.position.clone();
+    attachToHand(closest, hand);
     dbg(`Hand grab: ${closest.userData.kind}`);
   }
+}
+
+function attachToHand(g, hand) {
+  // Reparent to wrist joint (has proper orientation) — same approach as controller
+  const wrist = hand.joints['wrist'];
+  if (!wrist) return;
+  g.userData.grabbed = true;
+  hand.userData.holding = g;
+  const wp = new THREE.Vector3();
+  g.getWorldPosition(wp);
+  scene.remove(g);
+  wrist.add(g);
+  wrist.worldToLocal(wp);
+  g.position.copy(wp);
+  // Auto-orient like controller grab
+  if (g.userData.kind === 'lamp') {
+    g.rotation.set(Math.PI, 0, 0);
+    g.position.y += 0.04;
+  } else if (g.userData.kind === 'fuse') {
+    g.rotation.set(-Math.PI / 2, 0, 0);
+    g.position.y += 0.02;
+  } else if (g.userData.kind === 'wire') {
+    g.rotation.set(0, -Math.PI / 2, 0);
+  } else {
+    g.quaternion.identity();
+  }
+}
+
+function detachFromHand(g, hand) {
+  g.userData.grabbed = false;
+  hand.userData.holding = null;
+  const wp = new THREE.Vector3();
+  const wq = new THREE.Quaternion();
+  g.getWorldPosition(wp);
+  g.getWorldQuaternion(wq);
+  // Remove from wrist joint, re-add to scene
+  if (g.parent) g.parent.remove(g);
+  scene.add(g);
+  g.position.copy(wp);
+  g.quaternion.copy(wq);
 }
 
 function handleHandRelease(hand) {
   const g = hand.userData.holding;
   if (!g) return;
-  hand.userData.holding = null;
+  detachFromHand(g, hand);
 
-  // Try to snap to nearest socket (same logic as controller release)
-  const gPos = new THREE.Vector3();
-  g.getWorldPosition(gPos);
-  let bestSocket = null, bestDist = 0.12;
-  const allSockets = [...wireSockets, ...fuseSockets, lampSocket];
-  for (const s of allSockets) {
-    if (s.filled) continue;
-    if (s.accepts !== g.userData.kind) continue;
-    const sPos = new THREE.Vector3();
-    s.mesh.getWorldPosition(sPos);
-    const d = sPos.distanceTo(gPos);
-    if (d < bestDist) { bestDist = d; bestSocket = s; }
-  }
-  if (bestSocket && bestSocket.accepts === g.userData.kind) {
-    // Snap!
-    snapToSocket(g, bestSocket);
-    checkStateAdvance();
-  }
+  // Try snap (same logic as controller release)
+  trySnap(g);
   dbg(`Hand release: ${g.userData.kind}`);
 }
 
