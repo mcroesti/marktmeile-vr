@@ -1667,75 +1667,118 @@ for (let i = 0; i < 2; i++) {
 const hands = [];
 const PINCH_THRESHOLD = 0.025; // 2.5cm between thumb tip & index tip = pinch
 
-// WebXR hand joint names (25 joints per hand)
-const HAND_JOINTS = [
-  'wrist',
-  'thumb-metacarpal', 'thumb-phalanx-proximal', 'thumb-phalanx-distal', 'thumb-tip',
-  'index-finger-metacarpal', 'index-finger-phalanx-proximal', 'index-finger-phalanx-intermediate', 'index-finger-phalanx-distal', 'index-finger-tip',
-  'middle-finger-metacarpal', 'middle-finger-phalanx-proximal', 'middle-finger-phalanx-intermediate', 'middle-finger-phalanx-distal', 'middle-finger-tip',
-  'ring-finger-metacarpal', 'ring-finger-phalanx-proximal', 'ring-finger-phalanx-intermediate', 'ring-finger-phalanx-distal', 'ring-finger-tip',
-  'pinky-finger-metacarpal', 'pinky-finger-phalanx-proximal', 'pinky-finger-phalanx-intermediate', 'pinky-finger-phalanx-distal', 'pinky-finger-tip'
-];
-
-// Bone connections for skeleton lines (pairs of joint indices)
-const HAND_BONES = [
-  // Thumb
-  [0,1],[1,2],[2,3],[3,4],
+// Finger segment definitions: [startJoint, endJoint, radius]
+// Each segment is a capsule (rounded cylinder) between two joints
+const GLOVE_SEGMENTS = [
+  // Thumb (thicker)
+  ['thumb-metacarpal', 'thumb-phalanx-proximal', 0.012],
+  ['thumb-phalanx-proximal', 'thumb-phalanx-distal', 0.011],
+  ['thumb-phalanx-distal', 'thumb-tip', 0.010],
   // Index
-  [0,5],[5,6],[6,7],[7,8],[8,9],
+  ['index-finger-phalanx-proximal', 'index-finger-phalanx-intermediate', 0.010],
+  ['index-finger-phalanx-intermediate', 'index-finger-phalanx-distal', 0.009],
+  ['index-finger-phalanx-distal', 'index-finger-tip', 0.008],
   // Middle
-  [0,10],[10,11],[11,12],[12,13],[13,14],
+  ['middle-finger-phalanx-proximal', 'middle-finger-phalanx-intermediate', 0.010],
+  ['middle-finger-phalanx-intermediate', 'middle-finger-phalanx-distal', 0.009],
+  ['middle-finger-phalanx-distal', 'middle-finger-tip', 0.008],
   // Ring
-  [0,15],[15,16],[16,17],[17,18],[18,19],
+  ['ring-finger-phalanx-proximal', 'ring-finger-phalanx-intermediate', 0.009],
+  ['ring-finger-phalanx-intermediate', 'ring-finger-phalanx-distal', 0.008],
+  ['ring-finger-phalanx-distal', 'ring-finger-tip', 0.007],
   // Pinky
-  [0,20],[20,21],[21,22],[22,23],[23,24]
+  ['pinky-finger-phalanx-proximal', 'pinky-finger-phalanx-intermediate', 0.008],
+  ['pinky-finger-phalanx-intermediate', 'pinky-finger-phalanx-distal', 0.007],
+  ['pinky-finger-phalanx-distal', 'pinky-finger-tip', 0.006],
 ];
 
-const jointMat = new THREE.MeshBasicMaterial({ color: 0x44ffaa, transparent: true, opacity: 0.8 });
-const boneMat = new THREE.MeshBasicMaterial({ color: 0x33cc88, transparent: true, opacity: 0.6 });
-const jointGeo = new THREE.SphereGeometry(0.006, 6, 4);
+// Palm connections (flat triangles between knuckles and wrist)
+const PALM_TRIS = [
+  ['wrist', 'index-finger-metacarpal', 'middle-finger-metacarpal'],
+  ['wrist', 'middle-finger-metacarpal', 'ring-finger-metacarpal'],
+  ['wrist', 'ring-finger-metacarpal', 'pinky-finger-metacarpal'],
+  ['index-finger-metacarpal', 'index-finger-phalanx-proximal', 'middle-finger-phalanx-proximal'],
+  ['index-finger-metacarpal', 'middle-finger-metacarpal', 'middle-finger-phalanx-proximal'],
+  ['middle-finger-metacarpal', 'middle-finger-phalanx-proximal', 'ring-finger-phalanx-proximal'],
+  ['middle-finger-metacarpal', 'ring-finger-metacarpal', 'ring-finger-phalanx-proximal'],
+  ['ring-finger-metacarpal', 'ring-finger-phalanx-proximal', 'pinky-finger-phalanx-proximal'],
+  ['ring-finger-metacarpal', 'pinky-finger-metacarpal', 'pinky-finger-phalanx-proximal'],
+  ['wrist', 'thumb-metacarpal', 'index-finger-metacarpal'],
+];
+
+// Glove material — orange work gloves with slight roughness
+const gloveMat = new THREE.MeshStandardMaterial({
+  color: 0xE8820C,
+  roughness: 0.85,
+  metalness: 0.0,
+});
+const gloveTipMat = new THREE.MeshStandardMaterial({
+  color: 0x555555, // dark grey rubber fingertips
+  roughness: 0.6,
+  metalness: 0.0,
+});
+const palmMat = new THREE.MeshStandardMaterial({
+  color: 0xD07008,
+  roughness: 0.9,
+  metalness: 0.0,
+  side: THREE.DoubleSide,
+});
+// Wrist cuff — darker band
+const cuffMat = new THREE.MeshStandardMaterial({
+  color: 0x333333,
+  roughness: 0.7,
+  metalness: 0.1,
+});
 
 for (let i = 0; i < 2; i++) {
   const hand = renderer.xr.getHand(i);
   hand.userData = { holding: null, pinching: false, idx: i };
 
-  // Create joint spheres (25 per hand)
-  const jointMeshes = [];
-  for (let j = 0; j < 25; j++) {
-    const sphere = new THREE.Mesh(jointGeo, jointMat);
-    sphere.visible = false;
-    sphere.name = 'joint_' + j;
-    hand.add(sphere);
-    jointMeshes.push(sphere);
+  // Create finger segment cylinders (capsule-like)
+  const segMeshes = [];
+  for (let s = 0; s < GLOVE_SEGMENTS.length; s++) {
+    const [, , radius] = GLOVE_SEGMENTS[s];
+    // Use tip material for last segment of each finger (tip segments: indices 2,5,8,11,14)
+    const isTip = (s === 2 || s === 5 || s === 8 || s === 11 || s === 14);
+    const geo = new THREE.CapsuleGeometry(radius, 0.01, 4, 8); // length will be scaled
+    const mesh = new THREE.Mesh(geo, isTip ? gloveTipMat : gloveMat);
+    mesh.visible = false;
+    hand.add(mesh);
+    segMeshes.push(mesh);
   }
 
-  // Create bone cylinders between joints
-  const boneMeshes = [];
-  for (let b = 0; b < HAND_BONES.length; b++) {
-    const cyl = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.003, 0.003, 1, 4),
-      boneMat
-    );
-    cyl.visible = false;
-    cyl.name = 'bone_' + b;
-    hand.add(cyl);
-    boneMeshes.push(cyl);
-  }
+  // Create palm surface (triangulated mesh updated each frame)
+  const palmGeo = new THREE.BufferGeometry();
+  const palmVerts = new Float32Array(PALM_TRIS.length * 9); // 3 verts × 3 components
+  palmGeo.setAttribute('position', new THREE.BufferAttribute(palmVerts, 3));
+  palmGeo.computeVertexNormals();
+  const palmMesh = new THREE.Mesh(palmGeo, palmMat);
+  palmMesh.visible = false;
+  hand.add(palmMesh);
 
-  hand.userData.jointMeshes = jointMeshes;
-  hand.userData.boneMeshes = boneMeshes;
+  // Wrist cuff (torus around wrist)
+  const cuffGeo = new THREE.TorusGeometry(0.035, 0.008, 8, 16);
+  const cuffMesh = new THREE.Mesh(cuffGeo, cuffMat);
+  cuffMesh.visible = false;
+  hand.add(cuffMesh);
+
+  hand.userData.segMeshes = segMeshes;
+  hand.userData.palmMesh = palmMesh;
+  hand.userData.palmGeo = palmGeo;
+  hand.userData.cuffMesh = cuffMesh;
 
   scene.add(hand);
   hands.push(hand);
 }
 
-// Reusable vectors for bone positioning
-const _boneA = new THREE.Vector3();
-const _boneB = new THREE.Vector3();
-const _boneMid = new THREE.Vector3();
-const _boneDir = new THREE.Vector3();
-const _boneUp = new THREE.Vector3(0, 1, 0);
-const _boneQuat = new THREE.Quaternion();
+// Reusable vectors
+const _segA = new THREE.Vector3();
+const _segB = new THREE.Vector3();
+const _segMid = new THREE.Vector3();
+const _segDir = new THREE.Vector3();
+const _segUp = new THREE.Vector3(0, 1, 0);
+const _segQuat = new THREE.Quaternion();
+const _triV = new THREE.Vector3();
 
 function updateHandTracking() {
   for (const hand of hands) {
@@ -1743,36 +1786,55 @@ function updateHandTracking() {
     const thumbTip = hand.joints['thumb-tip'];
     if (!indexTip || !thumbTip) continue;
 
-    // Update joint sphere positions
-    const jm = hand.userData.jointMeshes;
-    for (let j = 0; j < HAND_JOINTS.length; j++) {
-      const joint = hand.joints[HAND_JOINTS[j]];
-      if (joint) {
-        jm[j].visible = true;
-        jm[j].position.copy(joint.position);
-        // Make fingertips slightly bigger
-        const isTip = j === 4 || j === 9 || j === 14 || j === 19 || j === 24;
-        jm[j].scale.setScalar(isTip ? 1.4 : 1.0);
-      }
+    // Update finger segment capsules
+    const sm = hand.userData.segMeshes;
+    for (let s = 0; s < GLOVE_SEGMENTS.length; s++) {
+      const [jNameA, jNameB, radius] = GLOVE_SEGMENTS[s];
+      const ja = hand.joints[jNameA];
+      const jb = hand.joints[jNameB];
+      if (!ja || !jb) continue;
+      sm[s].visible = true;
+      _segA.copy(ja.position);
+      _segB.copy(jb.position);
+      const len = _segA.distanceTo(_segB);
+      _segMid.addVectors(_segA, _segB).multiplyScalar(0.5);
+      sm[s].position.copy(_segMid);
+      // CapsuleGeometry: height is the cylinder part; total = height + 2*radius
+      // Scale Y to match bone length minus the two caps
+      const cylLen = Math.max(0.001, len - radius * 2);
+      sm[s].scale.set(1, cylLen / 0.01, 1); // 0.01 = original geo height
+      _segDir.subVectors(_segB, _segA).normalize();
+      _segQuat.setFromUnitVectors(_segUp, _segDir);
+      sm[s].quaternion.copy(_segQuat);
     }
 
-    // Update bone cylinders
-    const bm = hand.userData.boneMeshes;
-    for (let b = 0; b < HAND_BONES.length; b++) {
-      const [ai, bi] = HAND_BONES[b];
-      const ja = hand.joints[HAND_JOINTS[ai]];
-      const jb = hand.joints[HAND_JOINTS[bi]];
-      if (!ja || !jb) continue;
-      bm[b].visible = true;
-      _boneA.copy(ja.position);
-      _boneB.copy(jb.position);
-      const len = _boneA.distanceTo(_boneB);
-      _boneMid.addVectors(_boneA, _boneB).multiplyScalar(0.5);
-      bm[b].position.copy(_boneMid);
-      bm[b].scale.set(1, len, 1);
-      _boneDir.subVectors(_boneB, _boneA).normalize();
-      _boneQuat.setFromUnitVectors(_boneUp, _boneDir);
-      bm[b].quaternion.copy(_boneQuat);
+    // Update palm triangles
+    const pm = hand.userData.palmMesh;
+    const pg = hand.userData.palmGeo;
+    const posArr = pg.attributes.position.array;
+    let allPalmOk = true;
+    for (let t = 0; t < PALM_TRIS.length; t++) {
+      const [n0, n1, n2] = PALM_TRIS[t];
+      const j0 = hand.joints[n0], j1 = hand.joints[n1], j2 = hand.joints[n2];
+      if (!j0 || !j1 || !j2) { allPalmOk = false; break; }
+      const base = t * 9;
+      posArr[base]   = j0.position.x; posArr[base+1] = j0.position.y; posArr[base+2] = j0.position.z;
+      posArr[base+3] = j1.position.x; posArr[base+4] = j1.position.y; posArr[base+5] = j1.position.z;
+      posArr[base+6] = j2.position.x; posArr[base+7] = j2.position.y; posArr[base+8] = j2.position.z;
+    }
+    if (allPalmOk) {
+      pm.visible = true;
+      pg.attributes.position.needsUpdate = true;
+      pg.computeVertexNormals();
+    }
+
+    // Update wrist cuff
+    const cuff = hand.userData.cuffMesh;
+    const wrist = hand.joints['wrist'];
+    if (wrist) {
+      cuff.visible = true;
+      cuff.position.copy(wrist.position);
+      cuff.quaternion.copy(wrist.quaternion);
     }
 
     // Pinch detection
