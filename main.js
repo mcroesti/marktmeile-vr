@@ -1667,22 +1667,75 @@ for (let i = 0; i < 2; i++) {
 const hands = [];
 const PINCH_THRESHOLD = 0.025; // 2.5cm between thumb tip & index tip = pinch
 
+// WebXR hand joint names (25 joints per hand)
+const HAND_JOINTS = [
+  'wrist',
+  'thumb-metacarpal', 'thumb-phalanx-proximal', 'thumb-phalanx-distal', 'thumb-tip',
+  'index-finger-metacarpal', 'index-finger-phalanx-proximal', 'index-finger-phalanx-intermediate', 'index-finger-phalanx-distal', 'index-finger-tip',
+  'middle-finger-metacarpal', 'middle-finger-phalanx-proximal', 'middle-finger-phalanx-intermediate', 'middle-finger-phalanx-distal', 'middle-finger-tip',
+  'ring-finger-metacarpal', 'ring-finger-phalanx-proximal', 'ring-finger-phalanx-intermediate', 'ring-finger-phalanx-distal', 'ring-finger-tip',
+  'pinky-finger-metacarpal', 'pinky-finger-phalanx-proximal', 'pinky-finger-phalanx-intermediate', 'pinky-finger-phalanx-distal', 'pinky-finger-tip'
+];
+
+// Bone connections for skeleton lines (pairs of joint indices)
+const HAND_BONES = [
+  // Thumb
+  [0,1],[1,2],[2,3],[3,4],
+  // Index
+  [0,5],[5,6],[6,7],[7,8],[8,9],
+  // Middle
+  [0,10],[10,11],[11,12],[12,13],[13,14],
+  // Ring
+  [0,15],[15,16],[16,17],[17,18],[18,19],
+  // Pinky
+  [0,20],[20,21],[21,22],[22,23],[23,24]
+];
+
+const jointMat = new THREE.MeshBasicMaterial({ color: 0x44ffaa, transparent: true, opacity: 0.8 });
+const boneMat = new THREE.MeshBasicMaterial({ color: 0x33cc88, transparent: true, opacity: 0.6 });
+const jointGeo = new THREE.SphereGeometry(0.006, 6, 4);
+
 for (let i = 0; i < 2; i++) {
   const hand = renderer.xr.getHand(i);
   hand.userData = { holding: null, pinching: false, idx: i };
 
-  // Visual spheres on fingertips for feedback
-  const tipSphere = new THREE.Mesh(
-    new THREE.SphereGeometry(0.008, 8, 6),
-    new THREE.MeshBasicMaterial({ color: 0x44ff88, transparent: true, opacity: 0.7 })
-  );
-  tipSphere.name = 'handTip';
-  tipSphere.visible = false;
-  hand.add(tipSphere);
+  // Create joint spheres (25 per hand)
+  const jointMeshes = [];
+  for (let j = 0; j < 25; j++) {
+    const sphere = new THREE.Mesh(jointGeo, jointMat);
+    sphere.visible = false;
+    sphere.name = 'joint_' + j;
+    hand.add(sphere);
+    jointMeshes.push(sphere);
+  }
+
+  // Create bone cylinders between joints
+  const boneMeshes = [];
+  for (let b = 0; b < HAND_BONES.length; b++) {
+    const cyl = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.003, 0.003, 1, 4),
+      boneMat
+    );
+    cyl.visible = false;
+    cyl.name = 'bone_' + b;
+    hand.add(cyl);
+    boneMeshes.push(cyl);
+  }
+
+  hand.userData.jointMeshes = jointMeshes;
+  hand.userData.boneMeshes = boneMeshes;
 
   scene.add(hand);
   hands.push(hand);
 }
+
+// Reusable vectors for bone positioning
+const _boneA = new THREE.Vector3();
+const _boneB = new THREE.Vector3();
+const _boneMid = new THREE.Vector3();
+const _boneDir = new THREE.Vector3();
+const _boneUp = new THREE.Vector3(0, 1, 0);
+const _boneQuat = new THREE.Quaternion();
 
 function updateHandTracking() {
   for (const hand of hands) {
@@ -1690,24 +1743,48 @@ function updateHandTracking() {
     const thumbTip = hand.joints['thumb-tip'];
     if (!indexTip || !thumbTip) continue;
 
-    // Show tip sphere at pinch midpoint
-    const tipVis = hand.getObjectByName('handTip');
-    if (tipVis) {
-      tipVis.visible = true;
-      tipVis.position.copy(indexTip.position).add(thumbTip.position).multiplyScalar(0.5);
+    // Update joint sphere positions
+    const jm = hand.userData.jointMeshes;
+    for (let j = 0; j < HAND_JOINTS.length; j++) {
+      const joint = hand.joints[HAND_JOINTS[j]];
+      if (joint) {
+        jm[j].visible = true;
+        jm[j].position.copy(joint.position);
+        // Make fingertips slightly bigger
+        const isTip = j === 4 || j === 9 || j === 14 || j === 19 || j === 24;
+        jm[j].scale.setScalar(isTip ? 1.4 : 1.0);
+      }
     }
 
+    // Update bone cylinders
+    const bm = hand.userData.boneMeshes;
+    for (let b = 0; b < HAND_BONES.length; b++) {
+      const [ai, bi] = HAND_BONES[b];
+      const ja = hand.joints[HAND_JOINTS[ai]];
+      const jb = hand.joints[HAND_JOINTS[bi]];
+      if (!ja || !jb) continue;
+      bm[b].visible = true;
+      _boneA.copy(ja.position);
+      _boneB.copy(jb.position);
+      const len = _boneA.distanceTo(_boneB);
+      _boneMid.addVectors(_boneA, _boneB).multiplyScalar(0.5);
+      bm[b].position.copy(_boneMid);
+      bm[b].scale.set(1, len, 1);
+      _boneDir.subVectors(_boneB, _boneA).normalize();
+      _boneQuat.setFromUnitVectors(_boneUp, _boneDir);
+      bm[b].quaternion.copy(_boneQuat);
+    }
+
+    // Pinch detection
     const dist = indexTip.position.distanceTo(thumbTip.position);
     const isPinching = dist < PINCH_THRESHOLD;
 
     if (isPinching && !hand.userData.pinching) {
-      // Pinch started — grab nearest object
       hand.userData.pinching = true;
       const pinchPos = new THREE.Vector3();
       indexTip.getWorldPosition(pinchPos);
       handleHandGrab(hand, pinchPos);
     } else if (!isPinching && hand.userData.pinching) {
-      // Pinch released — drop object
       hand.userData.pinching = false;
       handleHandRelease(hand);
     }
